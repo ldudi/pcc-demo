@@ -1,21 +1,22 @@
-# PCC Test
+# PCC Limits Lab
 
-A minimal SwiftUI app for sending text prompts directly to Apple's `PrivateCloudComputeLanguageModel`. It never falls back to `SystemLanguageModel` or another model.
+A small iOS 27 SwiftUI app for measuring real requests to Apple's `PrivateCloudComputeLanguageModel`. It never falls back to `SystemLanguageModel` or another model. Request prompts, responses, exact Foundation Models usage, quota observations, errors, and timings are saved locally with SwiftData. No analytics or backend is used.
 
-## Requirements and configuration
+## Runtime facts
 
-- Xcode 27.0 SDK; the PCC API in this SDK is marked iOS 27.0+.
-- An iOS 27 Simulator runtime for a runtime request attempt.
-- `FoundationModels.framework` is imported and linked by the Xcode target.
-- The app target points to `PCCTest.entitlements`, which declares `com.apple.developer.private-cloud-compute = true`.
-- Apple describes this as a managed entitlement and requires eligibility and access approval. Adding the key to this project does not mean Apple has granted it. Request access through Apple's [Accessing Private Cloud Compute](https://developer.apple.com/documentation/foundationmodels/accessing-private-cloud-compute) process and use a provisioning profile that includes it.
+- `PrivateCloudComputeLanguageModel.contextSize` and `quotaUsage` are read from the installed framework at runtime.
+- Response and session usage are recorded from `response.usage` and `session.usage`.
+- The installed iOS 27 SDK does not expose `tokenCount(for:)` on `PrivateCloudComputeLanguageModel`; exact preflight prompt tokens are shown as unavailable. The post-response usage API is used instead.
+- Apple's PCC quota API reports a category and optional reset date/suggestion. It does not expose an exact remaining request count or a universal daily allowance.
+- The locally configured context warnings at 70%, 85%, and 95% are app safety thresholds, not Apple limits. Reaching 95% blocks PCC generation until a new session is started.
+- Context size, daily PCC quota, and short-term `LanguageModelError.rateLimited` are separate measurements.
 
-The local Simulator build currently uses Xcode's “Sign to Run Locally” identity. Xcode filtered the managed PCC entitlement out of that signature (the signed app entitlement dictionary is empty), so the entitlement is declared in the project but is not active in this build. The Simulator request below nevertheless returned a response from the explicitly selected PCC model. To test with an active signed entitlement, add a development team with Apple's PCC entitlement approval and use the matching provisioning profile.
+## Project and entitlement
 
-The app shows the exact PCC availability state and quota state exposed by the SDK. Request failures display Foundation Models/PCC error details. Availability states such as `deviceNotEligible` and `systemNotReady` are shown directly; they can include Simulator eligibility, Apple Intelligence readiness, or service state and are not silently reclassified.
-
-For repeatable Simulator checks without tapping the UI, launch the app with `--pcc-test-prompt=...`. The prompt is sent through the same PCC service used by the button.
+The project links `FoundationModels.framework`, targets iOS 27, and declares `com.apple.developer.private-cloud-compute = true` in `PCCTest.entitlements`. Apple treats PCC access as a managed entitlement requiring approval. The current local Simulator signature filters that entitlement out; successful Simulator requests were still observed, but a signed approved entitlement needs an Apple-approved development team and matching provisioning profile. See Apple's [PCC entitlement documentation](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.private-cloud-compute).
 
 ## Run
 
-Open `PCCTest.xcodeproj`, select an iOS 27 Simulator, and run the `PCCTest` scheme. The app logs PCC checks and request outcomes to the Xcode console without logging prompt or response content.
+Open `PCCTest.xcodeproj`, select the `PCCTest` scheme and an iOS 27 Simulator, then run. The `Lab`, `History`, and `Usage` tabs show the current session, saved attempts, historical aggregates, quota observations, and export controls. `New Session` creates a fresh PCC session while keeping all saved history.
+
+For deliberate Simulator verification, pass one `--pcc-test-prompt=...` argument per prompt at launch. Multiple arguments run sequentially in the same PCC session, one generation at a time, and save each result.

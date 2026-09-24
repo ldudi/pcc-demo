@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 @main
 struct PCCTestApp: App {
@@ -6,5 +7,6 @@ struct PCCTestApp: App {
         WindowGroup {
             ContentView()
         }
+        .modelContainer(for: [PCCRequestLog.self, PCCQuotaObservation.self])
     }
 }
