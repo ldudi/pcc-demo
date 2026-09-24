@@ -41,6 +41,10 @@ enum PCCExport {
             ("quota_reset_date", { $0.quotaResetDate.map { ISO8601DateFormatter().string(from: $0) } ?? "" }),
             ("reasoning_level", { $0.reasoningLevel ?? "" }), ("experiment_id", { $0.experimentID?.uuidString ?? "" }),
             ("experiment_kind", { $0.experimentKind ?? "" }), ("session_behavior", { $0.sessionBehavior ?? "" }),
+            ("contains_image", { String($0.containsImage) }), ("image_width", { $0.imageWidth.map { String($0) } ?? "" }),
+            ("image_height", { $0.imageHeight.map { String($0) } ?? "" }), ("image_approximate_bytes", { $0.imageApproximateBytes.map { String($0) } ?? "" }),
+            ("image_resolution", { $0.imageResolution ?? "" }), ("context_usage_before", { $0.contextUsageBefore.map { String($0) } ?? "" }),
+            ("context_usage_after", { $0.contextUsageAfter.map { String($0) } ?? "" }), ("observed_context_increase", { $0.observedContextIncrease.map { String($0) } ?? "" }),
             ("maximum_response_tokens", { $0.maximumResponseTokens.map { String($0) } ?? "" }),
             ("started_at", { ISO8601DateFormatter().string(from: $0.startedAt) }),
             ("completed_at", { $0.completedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "" }),
@@ -119,6 +123,14 @@ private struct PCCExportRecord: Encodable {
     let experimentID: UUID?
     let experimentKind: String?
     let sessionBehavior: String?
+    let containsImage: Bool
+    let imageWidth: Int?
+    let imageHeight: Int?
+    let imageApproximateBytes: Int?
+    let imageResolution: String?
+    let contextUsageBefore: Int?
+    let contextUsageAfter: Int?
+    let observedContextIncrease: Int?
 
     init(_ record: PCCRequestLog) {
         id = record.id
@@ -162,5 +174,13 @@ private struct PCCExportRecord: Encodable {
         experimentID = record.experimentID
         experimentKind = record.experimentKind
         sessionBehavior = record.sessionBehavior
+        containsImage = record.containsImage
+        imageWidth = record.imageWidth
+        imageHeight = record.imageHeight
+        imageApproximateBytes = record.imageApproximateBytes
+        imageResolution = record.imageResolution
+        contextUsageBefore = record.contextUsageBefore
+        contextUsageAfter = record.contextUsageAfter
+        observedContextIncrease = record.observedContextIncrease
     }
 }

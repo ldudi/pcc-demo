@@ -1,5 +1,8 @@
 import SwiftUI
 import SwiftData
+import PhotosUI
+import UIKit
+import ImageIO
 
 struct LabDashboardView: View {
     @Environment(\.modelContext) private var modelContext
@@ -372,6 +375,19 @@ struct RequestDetailView: View {
                 if let size = record.contextErrorSize { metric("Context error size", size) }
                 if let debug = record.contextErrorDebugDescription { LabeledContent("Context error debug", value: debug) }
             }
+            if record.containsImage {
+                Section("Image Attachment") {
+                    LabeledContent("Contains image", value: "Yes")
+                    LabeledContent("Dimensions", value: imageDimensions)
+                    LabeledContent("Approximate bytes", value: record.imageApproximateBytes.map { $0.formatted() } ?? "Unavailable")
+                    LabeledContent("Image size choice", value: record.imageResolution ?? "Original")
+                    LabeledContent("Context before", value: record.contextUsageBefore.map { "\($0.formatted()) tokens" } ?? "Unavailable")
+                    LabeledContent("Context after", value: record.contextUsageAfter.map { "\($0.formatted()) tokens" } ?? "Unavailable")
+                    LabeledContent("Observed context increase", value: record.observedContextIncrease.map { "\($0.formatted()) tokens" } ?? "Unavailable")
+                    Text("Observed context increase reflects the session's total measured change. The public API does not identify image-only tokens.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
             Section("Request Configuration") {
                 LabeledContent("Reasoning", value: record.reasoningLevel ?? "Default")
                 metric("Maximum response tokens", record.maximumResponseTokens)
@@ -397,6 +413,10 @@ struct RequestDetailView: View {
 
     @ViewBuilder private func metric(_ title: String, _ value: Int?) -> some View {
         LabeledContent(title, value: value.map { $0.formatted() } ?? "Unavailable")
+    }
+    private var imageDimensions: String {
+        guard let width = record.imageWidth, let height = record.imageHeight else { return "Unavailable" }
+        return "\(width) × \(height)"
     }
 }
 
@@ -605,4 +625,208 @@ struct ExperimentView: View {
             }
         }
     }
+}
+
+struct ImageTestView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \PCCRequestLog.timestamp, order: .reverse) private var requests: [PCCRequestLog]
+    @State private var service = PCCService()
+    @State private var selectedPhoto: PhotosPickerItem?
+    @State private var selectedImage: UIImage?
+    @State private var originalData: Data?
+    @State private var selectionError: String?
+    @State private var imagePrompt = PCCImagePrompt.describe.prompt
+    @State private var resolution: PCCImageResolution = .original
+    @State private var maximumTokens = "512"
+
+    private var latestImageRequest: PCCRequestLog? { requests.first { $0.containsImage } }
+    private var contextBefore: Int? { latestImageRequest?.contextUsageBefore }
+    private var contextAfter: Int? { latestImageRequest?.contextUsageAfter }
+    private var contextDelta: Int? { latestImageRequest?.observedContextIncrease }
+
+    var body: some View {
+        List {
+            Section("PCC image input") {
+                LabeledContent("Model", value: "PrivateCloudComputeLanguageModel")
+                LabeledContent("PCC availability", value: service.status)
+                LabeledContent("Quota", value: service.quotaStatus)
+                LabeledContent("Session ID", value: String(service.sessionID.uuidString.prefix(8)))
+                Text("This test sends a Foundation Models image attachment directly to the PCC-backed LanguageModelSession. No OCR, Vision, text conversion, or model fallback is used.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            Section("Select one photo") {
+                PhotosPicker(selection: $selectedPhoto, matching: .images, photoLibrary: .shared()) {
+                    Label("Choose Image from Photos", systemImage: "photo")
+                }
+                if let selectedImage {
+                    Image(uiImage: selectedImage)
+                        .resizable().scaledToFit().frame(maxHeight: 250).clipShape(RoundedRectangle(cornerRadius: 12))
+                    LabeledContent("Selected dimensions", value: "\(Int(selectedImage.size.width * selectedImage.scale)) × \(Int(selectedImage.size.height * selectedImage.scale))")
+                    LabeledContent("Selected bytes", value: originalData.map { $0.count.formatted() } ?? "Unavailable")
+                } else {
+                    Text("Select an image from the Simulator photo library. Camera access is not used.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                if let selectionError { Text(selectionError).foregroundStyle(.red).font(.footnote) }
+            }
+            Section("Image size") {
+                Picker("Attachment resolution", selection: $resolution) {
+                    ForEach(PCCImageResolution.allCases) { Text($0.label).tag($0) }
+                }
+                Text("Medium and Small preserve aspect ratio and resize the image before attaching it. The selected choice is sent only when you tap Send.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            Section("Prompt") {
+                Picker("Test", selection: $imagePrompt) {
+                    ForEach(PCCImagePrompt.allCases) { Text($0.label).tag($0.prompt) }
+                }
+                Text(imagePrompt).font(.callout).textSelection(.enabled)
+                TextField("Maximum response tokens", text: $maximumTokens).keyboardType(.numberPad)
+                Button {
+                    sendSelectedImage()
+                } label: {
+                    HStack {
+                        if service.isLoading { ProgressView() }
+                        Text(service.isLoading ? "Sending image to PCC…" : "Send Image Prompt to PCC")
+                    }.frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selectedImage?.cgImage == nil || service.isLoading || service.isSessionResponding || Int(maximumTokens).map { $0 <= 0 } != false)
+                Button("Start New PCC Session") { service.startNewSession() }
+                    .disabled(service.isLoading)
+            }
+            Section("IMAGE TOKEN EXPERIMENT") {
+                LabeledContent("Context before", value: contextBefore.map { "\($0.formatted()) tokens" } ?? "Unavailable until a request is sent")
+                LabeledContent("Context after", value: contextAfter.map { "\($0.formatted()) tokens" } ?? "Unavailable until a request is sent")
+                LabeledContent("Observed context increase", value: contextDelta.map { "\($0.formatted()) tokens" } ?? "Unavailable until a request is sent")
+                LabeledContent("Image", value: latestImageRequest.flatMap { dimensions($0) } ?? selectedDimensions)
+                LabeledContent("Request total", value: latestImageRequest?.totalTokens.map { "\($0.formatted()) tokens" } ?? "Unavailable")
+                if latestImageRequest != nil {
+                    Text("Observed context increase is the measured session usage change; it is not an image-specific token count.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            Section("Latest PCC response") {
+                if let response = service.response { Text(response).textSelection(.enabled) }
+                else if let errorMessage = service.errorMessage {
+                    Label(service.errorType ?? "Failed", systemImage: "xmark.circle.fill").foregroundStyle(.red)
+                    Text(errorMessage).textSelection(.enabled)
+                } else { Text("No image request sent in this session.").foregroundStyle(.secondary) }
+                if let duration = service.duration { LabeledContent("Latency", value: String(format: "%.2f sec", duration)) }
+            }
+            if let latestImageRequest {
+                Section("Latest saved image request") {
+                    NavigationLink("Request #\(latestImageRequest.globalRequestNumber > 0 ? latestImageRequest.globalRequestNumber : latestImageRequest.dailyRequestNumber)") {
+                        RequestDetailView(record: latestImageRequest)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Image Test")
+        .task { await service.checkAvailability(modelContext: modelContext) }
+        .onChange(of: selectedPhoto) { _, photo in
+            guard let photo else { return }
+            Task {
+                do {
+                    let bytes = try await photo.loadTransferable(type: Data.self)
+                    guard let bytes, let decoded = UIImage(data: bytes) else {
+                        selectionError = "The selected photo could not be decoded as an image."
+                        selectedImage = nil
+                        originalData = nil
+                        return
+                    }
+                    originalData = bytes
+                    selectedImage = decoded
+                    selectionError = nil
+                } catch {
+                    selectionError = error.localizedDescription
+                    selectedImage = nil
+                    originalData = nil
+                }
+            }
+        }
+    }
+
+    private var selectedDimensions: String {
+        guard let selectedImage, let cgImage = selectedImage.cgImage else { return "Unavailable" }
+        return "\(cgImage.width) × \(cgImage.height)"
+    }
+
+    private func dimensions(_ record: PCCRequestLog) -> String? {
+        guard let width = record.imageWidth, let height = record.imageHeight else { return nil }
+        return "\(width) × \(height)"
+    }
+
+    private func sendSelectedImage() {
+        guard let selectedImage, let sourceCGImage = selectedImage.cgImage,
+              let originalData, let maximumResponseTokens = Int(maximumTokens), maximumResponseTokens > 0 else { return }
+        let prepared: (cgImage: CGImage, orientation: CGImagePropertyOrientation, bytes: Int)
+        switch resolution {
+        case .original:
+            prepared = (sourceCGImage, cgOrientation(selectedImage.imageOrientation), originalData.count)
+        case .medium, .small:
+            let cap: CGFloat = resolution == .medium ? 1_600 : 768
+            let ratio = min(1, cap / max(selectedImage.size.width, selectedImage.size.height))
+            let size = CGSize(width: max(1, floor(selectedImage.size.width * ratio)), height: max(1, floor(selectedImage.size.height * ratio)))
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            let renderer = UIGraphicsImageRenderer(size: size, format: format)
+            let resized = renderer.image { _ in selectedImage.draw(in: CGRect(origin: .zero, size: size)) }
+            guard let cgImage = resized.cgImage, let encoded = resized.jpegData(compressionQuality: 0.84) else {
+                selectionError = "The selected image could not be resized for attachment."
+                return
+            }
+            prepared = (cgImage, .up, encoded.count)
+        }
+        Task {
+            await service.sendImage(prompt: imagePrompt, image: prepared.cgImage, orientation: prepared.orientation,
+                                    imageApproximateBytes: prepared.bytes, imageResolution: resolution.label,
+                                    maximumResponseTokens: maximumResponseTokens, modelContext: modelContext)
+        }
+    }
+
+    private func cgOrientation(_ orientation: UIImage.Orientation) -> CGImagePropertyOrientation {
+        switch orientation {
+        case .up: .up
+        case .upMirrored: .upMirrored
+        case .down: .down
+        case .downMirrored: .downMirrored
+        case .leftMirrored: .leftMirrored
+        case .right: .right
+        case .rightMirrored: .rightMirrored
+        case .left: .left
+        @unknown default: .up
+        }
+    }
+}
+
+private enum PCCImagePrompt: String, CaseIterable, Identifiable {
+    case describe
+    case mostImportant
+    case readableText
+
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .describe: "Describe the image"
+        case .mostImportant: "Most important detail"
+        case .readableText: "Readable text and summary"
+        }
+    }
+    var prompt: String {
+        switch self {
+        case .describe: "Describe what you see in this image. Identify the main objects, setting, colors, and any notable details."
+        case .mostImportant: "What is the most important thing visible in this image, and why?"
+        case .readableText: "Read any clearly visible text in this image and summarize what the image is about."
+        }
+    }
+}
+
+private enum PCCImageResolution: String, CaseIterable, Identifiable {
+    case original
+    case medium
+    case small
+
+    var id: String { rawValue }
+    var label: String { rawValue.capitalized }
 }

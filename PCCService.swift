@@ -2,6 +2,8 @@ import Foundation
 import FoundationModels
 import Observation
 import SwiftData
+import CoreGraphics
+import ImageIO
 
 @Observable
 @MainActor
@@ -290,6 +292,193 @@ final class PCCService {
             try? modelContext.save()
             fail(details.type, details.message)
         }
+    }
+
+    func sendImage(
+        prompt: String,
+        image: CGImage,
+        orientation: CGImagePropertyOrientation,
+        imageApproximateBytes: Int,
+        imageResolution: String,
+        reasoningLevel: PCCReasoningChoice = .default,
+        maximumResponseTokens: Int = 512,
+        modelContext: ModelContext
+    ) async {
+        guard !isLoading, !isSessionResponding else { return }
+        response = nil
+        errorMessage = nil
+        errorType = nil
+        duration = nil
+        requestState = "Checking PCC"
+
+        guard #available(iOS 27.0, *) else {
+            failWithoutRecord("API unavailable", "PrivateCloudComputeLanguageModel requires iOS 27.0 or later.")
+            return
+        }
+        refreshAvailabilityAndQuota()
+        if contextSize == nil { contextSize = try? await model.contextSize }
+        if session == nil { startNewSession() }
+
+        let startedAt = Date()
+        let existingRecords = (try? modelContext.fetch(FetchDescriptor<PCCRequestLog>())) ?? []
+        let todayRecords = existingRecords.filter { Calendar.current.isDateInToday($0.timestamp) }
+        recordQuotaTransition(in: modelContext, activeDailyRequestNumber: todayRecords.count + 1)
+        let sessionRecords = existingRecords.filter { $0.sessionID == sessionID }
+        let beforeUsage = session?.usage.totalTokenCount
+        sessionUsage = beforeUsage
+        let record = PCCRequestLog()
+        record.timestamp = startedAt
+        record.startedAt = startedAt
+        record.sessionID = sessionID
+        record.globalRequestNumber = (existingRecords.map(\.globalRequestNumber).max() ?? 0) > 0
+            ? (existingRecords.map(\.globalRequestNumber).max() ?? 0) + 1 : existingRecords.count + 1
+        record.dailyRequestNumber = todayRecords.count + 1
+        record.sessionRequestNumber = sessionRecords.count + 1
+        record.prompt = prompt
+        record.reasoningLevel = reasoningLevel.label
+        record.maximumResponseTokens = maximumResponseTokens
+        record.quotaStatusBefore = quotaStatus
+        record.quotaResetDate = quotaResetDate
+        record.pccAvailabilityBefore = status
+        record.contextSize = contextSize
+        record.sessionAccumulatedTokens = beforeUsage
+        record.contextUsageBefore = beforeUsage
+        record.containsImage = true
+        record.imageWidth = image.width
+        record.imageHeight = image.height
+        record.imageApproximateBytes = imageApproximateBytes
+        record.imageResolution = imageResolution
+        record.experimentKind = "PCC image understanding"
+        record.sessionBehavior = "Same session image follow-up"
+        record.errorType = "Request pending"
+        record.errorDescription = "PCC image request recorded locally and in progress."
+
+        func saveFailure(_ type: String, _ message: String) {
+            record.errorType = type
+            record.errorDescription = message
+            record.completedAt = .now
+            record.sessionAccumulatedTokens = session?.usage.totalTokenCount ?? beforeUsage
+            record.contextUsageAfter = session?.usage.totalTokenCount
+            if let before = record.contextUsageBefore, let after = record.contextUsageAfter {
+                record.observedContextIncrease = after - before
+            }
+            record.quotaStatusAfter = quotaStatus
+            record.pccAvailabilityAfter = status
+            record.quotaResetDate = quotaResetDate
+            contextSaveFailure(record, in: modelContext)
+            fail(type, message)
+        }
+
+        if case .unavailable(let reason) = model.availability {
+            saveFailure("Model Unavailable", reasonDescription(reason))
+            return
+        }
+        if quotaStatus == "Limit Reached" {
+            saveFailure("Quota Limit Reached", "PCC quota is already at its limit. Apple did not accept an image request.")
+            return
+        }
+        if let beforeUsage, let contextSize, contextSize > 0, Double(beforeUsage) / Double(contextSize) >= 0.95 {
+            saveFailure("Context safety threshold", "Context nearly full. Start a new PCC session before continuing.")
+            return
+        }
+        guard let session else {
+            saveFailure("PCC session unavailable", "Failed to create a PCC LanguageModelSession.")
+            return
+        }
+        guard persist(record, in: modelContext) else {
+            failWithoutRecord("Local persistence failed", "The image request was not sent because SwiftData could not save its request record.")
+            return
+        }
+
+        isLoading = true
+        requestState = "In progress"
+        defer { isLoading = false }
+        let clockStart = ContinuousClock.now
+        do {
+            let attachment = Attachment(image, orientation: orientation).label("test-image")
+            let imagePrompt = Prompt {
+                prompt
+                attachment
+            }
+            let contextOptions = ContextOptions(reasoningLevel: reasoningLevel.foundationLevel)
+            let result = try await session.respond(
+                to: imagePrompt,
+                options: GenerationOptions(maximumResponseTokens: maximumResponseTokens),
+                contextOptions: contextOptions
+            )
+            duration = seconds(clockStart.duration(to: .now))
+            response = result.content
+            requestState = "Successful"
+            record.response = result.content
+            record.succeeded = true
+            record.errorType = nil
+            record.errorDescription = nil
+            record.inputTokens = result.usage.input.totalTokenCount
+            record.cachedInputTokens = result.usage.input.cachedTokenCount
+            record.outputTokens = result.usage.output.totalTokenCount
+            record.reasoningTokens = result.usage.output.reasoningTokenCount
+            record.totalTokens = result.usage.totalTokenCount
+            record.sessionAccumulatedTokens = session.usage.totalTokenCount
+            record.contextUsageAfter = session.usage.totalTokenCount
+            if let before = record.contextUsageBefore, let after = record.contextUsageAfter {
+                record.observedContextIncrease = after - before
+            }
+            record.contextSize = contextSize
+            record.contextUsagePercentage = contextSize.flatMap { $0 > 0 ? Double(session.usage.totalTokenCount) / Double($0) * 100 : nil }
+            record.completedAt = .now
+            record.latencyMilliseconds = Int((duration ?? 0) * 1_000)
+            if let input = record.inputTokens, input > 0, let output = record.outputTokens {
+                record.outputInputRatio = Double(output) / Double(input)
+            }
+            if let output = record.outputTokens, output > 0, let reasoning = record.reasoningTokens {
+                record.reasoningOutputPercentage = Double(reasoning) / Double(output) * 100
+            }
+            if let output = record.outputTokens, let milliseconds = record.latencyMilliseconds, milliseconds > 0 {
+                record.outputTokensPerSecond = Double(output) / (Double(milliseconds) / 1_000)
+            }
+            sessionUsage = session.usage.totalTokenCount
+            refreshAvailabilityAndQuota()
+            record.quotaStatusAfter = quotaStatus
+            record.pccAvailabilityAfter = status
+            record.quotaResetDate = quotaResetDate
+            recordQuotaTransition(in: modelContext, activeDailyRequestNumber: record.dailyRequestNumber)
+            try modelContext.save()
+        } catch {
+            duration = seconds(clockStart.duration(to: .now))
+            record.latencyMilliseconds = Int((duration ?? 0) * 1_000)
+            let details = Task.isCancelled
+                ? (type: "Cancelled", message: "The PCC image request was cancelled.", contextTokenCount: nil, contextSize: nil, contextDebugDescription: nil)
+                : describe(error)
+            record.errorType = details.type
+            record.errorDescription = details.message
+            record.contextErrorTokenCount = details.contextTokenCount
+            record.contextErrorSize = details.contextSize
+            record.contextErrorDebugDescription = details.contextDebugDescription
+            record.sessionAccumulatedTokens = session.usage.totalTokenCount
+            record.contextUsageAfter = session.usage.totalTokenCount
+            if let before = record.contextUsageBefore, let after = record.contextUsageAfter {
+                record.observedContextIncrease = after - before
+            }
+            sessionUsage = session.usage.totalTokenCount
+            refreshAvailabilityAndQuota()
+            if let pccError = error as? PrivateCloudComputeLanguageModel.Error,
+               case .quotaLimitReached(let quotaError) = pccError {
+                quotaStatus = "Limit Reached"
+                quotaResetDate = quotaError.resetDate
+            }
+            record.quotaStatusAfter = quotaStatus
+            record.pccAvailabilityAfter = status
+            record.quotaResetDate = quotaResetDate
+            record.completedAt = .now
+            recordQuotaTransition(in: modelContext, activeDailyRequestNumber: record.dailyRequestNumber)
+            try? modelContext.save()
+            fail(details.type, details.message)
+        }
+    }
+
+    private func contextSaveFailure(_ record: PCCRequestLog, in context: ModelContext) {
+        context.insert(record)
+        try? context.save()
     }
 
     @available(iOS 27.0, *)

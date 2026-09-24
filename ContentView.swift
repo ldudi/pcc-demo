@@ -12,6 +12,8 @@ struct ContentView: View {
                 .tabItem { Label("Usage", systemImage: "chart.bar") }
             NavigationStack { ExperimentView() }
                 .tabItem { Label("Experiments", systemImage: "testtube.2") }
+            NavigationStack { ImageTestView() }
+                .tabItem { Label("Image Test", systemImage: "photo.badge.magnifyingglass") }
         }
         .tint(.indigo)
     }

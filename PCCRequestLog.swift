@@ -44,6 +44,14 @@ final class PCCRequestLog {
     var experimentID: UUID?
     var experimentKind: String?
     var sessionBehavior: String?
+    var containsImage: Bool = false
+    var imageWidth: Int?
+    var imageHeight: Int?
+    var imageApproximateBytes: Int?
+    var imageResolution: String?
+    var contextUsageBefore: Int?
+    var contextUsageAfter: Int?
+    var observedContextIncrease: Int?
 
     init() {}
 }
